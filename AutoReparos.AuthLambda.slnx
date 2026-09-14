@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AutoReparos.AuthLambda.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AutoReparos.AuthLambda.Tests.csproj" />
+  </Folder>
+</Solution>

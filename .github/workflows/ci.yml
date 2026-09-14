@@ -1,0 +1,30 @@
+name: CI - AutoReparos AuthLambda
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (.NET 10)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore Dependencies
+        run: dotnet restore AutoReparos.AuthLambda.slnx
+
+      - name: Build Solution
+        run: dotnet build AutoReparos.AuthLambda.slnx --configuration Release --no-restore
+
+      - name: Run Unit Tests
+        run: dotnet test AutoReparos.AuthLambda.slnx --configuration Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
