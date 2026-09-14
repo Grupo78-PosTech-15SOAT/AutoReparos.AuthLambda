@@ -90,13 +90,27 @@ AutoReparos.AuthLambda/
 
 ---
 
-## 4. Como Executar os Testes Localmente
+## 4. Ambiente de Testes Local com Docker Compose
+
+O repositório inclui um arquivo `docker-compose.yml` para executar um PostgreSQL local e validar a Lambda em ambiente isolado:
+
+```bash
+# Iniciar o PostgreSQL para testes locais da Lambda
+docker-compose up -d postgres
+
+# Construir a imagem Docker da Lambda (.NET 10)
+docker build -t autoreparos-auth-lambda .
+```
+
+---
+
+## 5. Como Executar os Testes Localmente
 
 ```bash
 # Restaurar dependências e compilar
 dotnet build AutoReparos.AuthLambda.slnx
 
-# Executar suíte de 40 testes unitários
+# Executar suíte de 40 testes unitários com cobertura
 dotnet test AutoReparos.AuthLambda.slnx
 ```
 

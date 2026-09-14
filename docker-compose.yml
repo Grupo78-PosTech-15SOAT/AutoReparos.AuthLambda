@@ -1,0 +1,43 @@
+# Docker Compose - AutoReparos.AuthLambda (Local Testing Environment)
+services:
+  postgres:
+    image: postgres:16
+    container_name: autoreparos-lambda-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-autoreparos}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-Admin@123}
+    ports:
+      - "5432:5432"
+    volumes:
+      - lambda_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d autoreparos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - autoreparos-lambda-network
+
+  auth-lambda:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoreparos-auth-lambda
+    restart: "no"
+    environment:
+      - ConnectionStrings__DbConnection=Host=postgres;Database=${POSTGRES_DB:-autoreparos};Username=${POSTGRES_USER:-admin};Password=${DB_PASSWORD:-Admin@123}
+      - Jwt__Secret=${JWT_SECRET:-FBQOvEaUYAlmdilnGOk7vKzO9xUHiLgb8QCFUrk6af9}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - autoreparos-lambda-network
+
+volumes:
+  lambda_pg_data:
+
+networks:
+  autoreparos-lambda-network:
+    driver: bridge
