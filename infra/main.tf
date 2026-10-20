@@ -1,0 +1,179 @@
+terraform {
+  required_version = ">= 1.7.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  backend "s3" {
+    bucket         = "autoreparos-terraform-state-backend"
+    key            = "lambda-auth/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "autoreparos-terraform-locks"
+    encrypt        = true
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project     = "AutoReparos"
+      Component   = "ClienteAuthFunction"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+      Repository  = "Grupo78-PosTech-15SOAT/AutoReparos.AuthLambda"
+      Fase        = "Fase-3"
+    }
+  }
+}
+
+# Auto-descoberta da VPC caso não informada explicitamente via variável
+data "aws_vpc" "selected" {
+  count = var.vpc_id == "" ? 1 : 0
+  tags = {
+    Name = "${var.environment}-vpc"
+  }
+}
+
+locals {
+  vpc_id = var.vpc_id != "" ? var.vpc_id : (length(data.aws_vpc.selected) > 0 ? data.aws_vpc.selected[0].id : "")
+}
+
+# Auto-descoberta das subnets privadas da VPC caso não informadas explicitamente
+data "aws_subnets" "private" {
+  count = length(var.private_subnet_ids) == 0 && local.vpc_id != "" ? 1 : 0
+  filter {
+    name   = "vpc-id"
+    values = [local.vpc_id]
+  }
+  tags = {
+    "kubernetes.io/role/internal-elb" = "1"
+  }
+}
+
+# Security group criado para a Lambda caso nenhum existente tenha sido fornecido
+resource "aws_security_group" "lambda_sg" {
+  count       = var.lambda_security_group_id == "" && local.vpc_id != "" ? 1 : 0
+  name        = "autoreparos-auth-lambda-sg-${var.environment}"
+  description = "Security group para a AWS Lambda ClienteAuthFunction acessar o RDS PostgreSQL"
+  vpc_id      = local.vpc_id
+
+  egress {
+    description = "Permitir saida para o PostgreSQL na porta 5432"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "Permitir saida HTTPS para servicos AWS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "autoreparos-auth-lambda-sg-${var.environment}"
+  }
+}
+
+locals {
+  private_subnet_ids       = length(var.private_subnet_ids) > 0 ? var.private_subnet_ids : (length(data.aws_subnets.private) > 0 ? data.aws_subnets.private[0].ids : [])
+  lambda_security_group_id = var.lambda_security_group_id != "" ? var.lambda_security_group_id : (length(aws_security_group.lambda_sg) > 0 ? aws_security_group.lambda_sg[0].id : "")
+
+  # Resolução da string de conexão com o RDS PostgreSQL
+  db_connection_string = var.db_connection_string != "" ? var.db_connection_string : (
+    var.db_host != "" ? "Host=${var.db_host};Port=${var.db_port};Database=${var.db_name};Username=${var.db_username};Password=${var.db_password};SSL Mode=Prefer;" : ""
+  )
+}
+
+# IAM Role para Execução da Lambda
+resource "aws_iam_role" "lambda_exec" {
+  name = "autoreparos-auth-lambda-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Anexar políticas gerenciadas para logs CloudWatch e VPC
+resource "aws_iam_role_policy_attachment" "lambda_basic" {
+  role       = aws_iam_role.lambda_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_vpc_access" {
+  role       = aws_iam_role.lambda_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+# CloudWatch Log Group com retenção de 14 dias
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/autoreparos-auth-lambda-${var.environment}"
+  retention_in_days = 14
+}
+
+# Função Lambda .NET 8 (Managed Runtime da AWS)
+resource "aws_lambda_function" "auth_lambda" {
+  function_name = "autoreparos-auth-lambda-${var.environment}"
+  role          = aws_iam_role.lambda_exec.arn
+  handler       = "AutoReparos.AuthLambda::AutoReparos.AuthLambda.Functions.ClienteAuthFunction::FunctionHandler"
+  runtime       = "dotnet8"
+  architectures = ["x86_64"]
+  timeout       = 15
+  memory_size   = 512
+
+  filename         = var.lambda_zip_path != "" ? var.lambda_zip_path : null
+  source_code_hash = var.lambda_zip_path != "" ? filebase64sha256(var.lambda_zip_path) : null
+
+  environment {
+    variables = {
+      ConnectionStrings__DbConnection = local.db_connection_string
+      DB_CONNECTION                   = local.db_connection_string
+      Jwt__Secret                     = var.jwt_secret
+      JWT_SECRET                      = var.jwt_secret
+      Jwt__ExpiryHours                = tostring(var.jwt_expiry_hours)
+      ASPNETCORE_ENVIRONMENT          = var.environment
+    }
+  }
+
+  dynamic "vpc_config" {
+    for_each = length(local.private_subnet_ids) > 0 && local.lambda_security_group_id != "" ? [1] : []
+    content {
+      subnet_ids         = local.private_subnet_ids
+      security_group_ids = [local.lambda_security_group_id]
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda_logs,
+    aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy_attachment.lambda_vpc_access
+  ]
+}
+
+# Permissão para o API Gateway invocar a Lambda
+resource "aws_lambda_permission" "api_gw" {
+  count         = var.api_gateway_execution_arn != "" ? 1 : 0
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.auth_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${var.api_gateway_execution_arn}/*/*"
+}

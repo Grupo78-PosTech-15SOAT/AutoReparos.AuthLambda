@@ -1,4 +1,4 @@
-name: CI - AutoReparos.AuthLambda
+name: CI/CD - AutoReparos.AuthLambda
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,21 +15,32 @@ on:
     paths-ignore:
       - '**.md'
       - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Digite "CONFIRMAR-APPLY" para autorizar o deploy na AWS'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
 
 env:
   DOTNET_VERSION: '10.0.x'
+  AWS_REGION: 'us-east-1'
 
 jobs:
   build-and-test:
-    name: Compilação e Testes (.NET 10)
+    name: Compilação, Testes & Empacotamento ZIP
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@v4
 
-      - name: Setup .NET Core
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -41,3 +52,97 @@ jobs:
 
       - name: Run Unit Tests
         run: dotnet test AutoReparos.AuthLambda.slnx -c Release --no-build --verbosity normal --collect:"XPlat Code Coverage"
+
+      - name: Publish Lambda Artifact (.NET 8 Managed Runtime)
+        run: |
+          dotnet publish src/AutoReparos.AuthLambda.csproj -c Release -o ./publish
+          cd ./publish && zip -r ../lambda_package.zip .
+
+      - name: Upload Lambda Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-package
+          path: lambda_package.zip
+          retention-days: 7
+
+  iac-validate:
+    name: Validação de Infraestrutura (Terraform)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Terraform Format Check
+        working-directory: ./infra
+        run: terraform fmt -check
+
+      - name: Terraform Init (Validação Sintática)
+        working-directory: ./infra
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: ./infra
+        run: terraform validate
+
+  terraform-plan:
+    name: Planejamento de Deploy (Terraform Plan)
+    needs: [build-and-test, iac-validate]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Lambda Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-package
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.0
+
+      - name: Validar Configuração OIDC
+        run: |
+          if [ -z "${{ secrets.AWS_ROLE_ARN }}" ]; then
+            echo "::error::Secret AWS_ROLE_ARN não configurado. Autenticação GitHub Actions OIDC requer a ARN da IAM Role configurada."
+            exit 1
+          fi
+
+      - name: Configurar Credenciais AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Terraform Init (Backend Remoto S3)
+        working-directory: ./infra
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infra
+        env:
+          TF_VAR_environment: "production"
+          TF_VAR_lambda_zip_path: "../lambda_package.zip"
+          TF_VAR_db_connection_string: ${{ secrets.CONNECTION_STRING }}
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+        run: terraform plan -no-color
+
+      - name: Terraform Apply (Apenas sob Confirmação Explícita)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'CONFIRMAR-APPLY'
+        working-directory: ./infra
+        env:
+          TF_VAR_environment: "production"
+          TF_VAR_lambda_zip_path: "../lambda_package.zip"
+          TF_VAR_db_connection_string: ${{ secrets.CONNECTION_STRING }}
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+        run: terraform apply -auto-approve

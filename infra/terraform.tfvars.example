@@ -1,0 +1,10 @@
+aws_region        = "us-east-1"
+environment       = "production"
+lambda_zip_path   = "../publish/AutoReparos.AuthLambda.zip"
+db_host           = "autoreparos-rds-production.xxxx.us-east-1.rds.amazonaws.com"
+db_port           = 5432
+db_name           = "autoreparos_db"
+db_username       = "autoreparos_admin"
+db_password       = "DefinirEmVariavelDeAmbienteOuSecret"
+jwt_secret        = "DefinirChaveSecretaComMaisDe32Caracteres"
+jwt_expiry_hours  = 1
