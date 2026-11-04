@@ -27,7 +27,7 @@ sequenceDiagram
     participant RDS as PostgreSQL (AWS RDS)
 
     Cliente->>APIGW: POST /auth/cliente { cpf, email }
-    APIGW->>Lambda: Invoca Handler (APIGatewayProxyRequest)
+    APIGW->>Lambda: Invoca Handler (payload proxy 1.0 / APIGatewayProxyRequest)
     Lambda->>Lambda: Normaliza e valida Módulo 11 do CPF
     alt CPF Matemático Inválido
         Lambda-->>APIGW: 400 Bad Request
