@@ -10,6 +10,8 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+publish/
+*.zip
 
 # Visual Studio / Rider / VS Code cache
 .vs/
@@ -34,3 +36,16 @@ Thumbs.db
 # Environment and secrets
 .env
 local.settings.json
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
