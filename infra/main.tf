@@ -4,14 +4,12 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.27"
     }
   }
 
   backend "s3" {
-    bucket         = "autoreparos-terraform-state-backend"
     key            = "lambda-auth/terraform.tfstate"
-    region         = "us-east-1"
     dynamodb_table = "autoreparos-terraform-locks"
     encrypt        = true
   }
@@ -56,37 +54,9 @@ data "aws_subnets" "private" {
   }
 }
 
-# Security group criado para a Lambda caso nenhum existente tenha sido fornecido
-resource "aws_security_group" "lambda_sg" {
-  count       = var.lambda_security_group_id == "" && local.vpc_id != "" ? 1 : 0
-  name        = "autoreparos-auth-lambda-sg-${var.environment}"
-  description = "Security group para a AWS Lambda ClienteAuthFunction acessar o RDS PostgreSQL"
-  vpc_id      = local.vpc_id
-
-  egress {
-    description = "Permitir saida para o PostgreSQL na porta 5432"
-    from_port   = 5432
-    to_port     = 5432
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    description = "Permitir saida HTTPS para servicos AWS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "autoreparos-auth-lambda-sg-${var.environment}"
-  }
-}
-
 locals {
   private_subnet_ids       = length(var.private_subnet_ids) > 0 ? var.private_subnet_ids : (length(data.aws_subnets.private) > 0 ? data.aws_subnets.private[0].ids : [])
-  lambda_security_group_id = var.lambda_security_group_id != "" ? var.lambda_security_group_id : (length(aws_security_group.lambda_sg) > 0 ? aws_security_group.lambda_sg[0].id : "")
+  lambda_security_group_id = var.lambda_security_group_id
 
   # Resolução da string de conexão com o RDS PostgreSQL
   db_connection_string = var.db_connection_string != "" ? var.db_connection_string : (
@@ -134,7 +104,7 @@ resource "aws_lambda_function" "auth_lambda" {
   function_name = "autoreparos-auth-lambda-${var.environment}"
   role          = aws_iam_role.lambda_exec.arn
   handler       = "AutoReparos.AuthLambda::AutoReparos.AuthLambda.Functions.ClienteAuthFunction::FunctionHandler"
-  runtime       = "dotnet8"
+  runtime       = "dotnet10"
   architectures = ["x86_64"]
   timeout       = 15
   memory_size   = 512

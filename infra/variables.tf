@@ -29,9 +29,12 @@ variable "private_subnet_ids" {
 }
 
 variable "lambda_security_group_id" {
-  description = "ID do Security Group para a Lambda. Se vazio, um novo Security Group com saída na porta 5432 será provisionado"
+  description = "Existing shared Security Group ID created by the network state"
   type        = string
-  default     = ""
+  validation {
+    condition     = startswith(var.lambda_security_group_id, "sg-")
+    error_message = "Pass the pre-created Lambda security group ID from the network layer."
+  }
 }
 
 variable "db_connection_string" {
