@@ -37,55 +37,17 @@ variable "lambda_security_group_id" {
   }
 }
 
-variable "db_connection_string" {
-  description = "String de conexão completa com o PostgreSQL. Se fornecida, sobrepõe as variáveis individuais de DB"
+variable "cadastros_base_url" {
+  description = "URL interna do Cadastros (por exemplo, o endereço interno do serviço no cluster). A Lambda não acessa o banco: autentica o cliente por POST /internal/clientes/autenticar"
+  type        = string
+  default     = ""
+}
+
+variable "cadastros_chave_interna" {
+  description = "Segredo enviado no cabeçalho X-Chave-Interna ao Cadastros (o mesmo Secret do K8s do Cadastros)"
   type        = string
   default     = ""
   sensitive   = true
-}
-
-variable "db_host" {
-  description = "Host do RDS PostgreSQL (endpoint DNS)"
-  type        = string
-  default     = ""
-}
-
-variable "db_port" {
-  description = "Porta do RDS PostgreSQL"
-  type        = number
-  default     = 5432
-}
-
-variable "db_name" {
-  description = "Nome do banco de dados relacional"
-  type        = string
-  default     = "autoreparos_db"
-}
-
-variable "db_username" {
-  description = "Usuário do RDS PostgreSQL"
-  type        = string
-  default     = "autoreparos_admin"
-}
-
-variable "db_password" {
-  description = "Senha do RDS PostgreSQL"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "jwt_secret" {
-  description = "Chave secreta para assinatura dos tokens JWT dos clientes (mínimo 32 caracteres)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "jwt_expiry_hours" {
-  description = "Tempo de expiração do JWT gerado em horas"
-  type        = number
-  default     = 1
 }
 
 variable "api_gateway_execution_arn" {
