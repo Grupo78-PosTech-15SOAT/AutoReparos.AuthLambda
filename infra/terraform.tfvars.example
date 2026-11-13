@@ -1,10 +1,5 @@
 aws_region        = "us-east-1"
 environment       = "production"
 lambda_zip_path   = "../publish/AutoReparos.AuthLambda.zip"
-db_host           = "" # Set only for local plans; production receives the secret from AWS.
-db_port           = 5432
-db_name           = "autoreparos_db"
-db_username       = "autoreparos_admin"
-db_password       = "" # Never put credentials in terraform.tfvars.
-jwt_secret        = "" # Supplied via TF_VAR_jwt_secret from the GitHub Environment secret.
-jwt_expiry_hours  = 1
+cadastros_base_url = "" # URL interna do Cadastros; a Lambda não acessa o banco.
+cadastros_chave_interna = "" # Supplied via TF_VAR_cadastros_chave_interna from the GitHub Environment secret.

@@ -58,10 +58,6 @@ locals {
   private_subnet_ids       = length(var.private_subnet_ids) > 0 ? var.private_subnet_ids : (length(data.aws_subnets.private) > 0 ? data.aws_subnets.private[0].ids : [])
   lambda_security_group_id = var.lambda_security_group_id
 
-  # Resolução da string de conexão com o RDS PostgreSQL
-  db_connection_string = var.db_connection_string != "" ? var.db_connection_string : (
-    var.db_host != "" ? "Host=${var.db_host};Port=${var.db_port};Database=${var.db_name};Username=${var.db_username};Password=${var.db_password};SSL Mode=Prefer;" : ""
-  )
 }
 
 # IAM Role para Execução da Lambda
@@ -114,12 +110,9 @@ resource "aws_lambda_function" "auth_lambda" {
 
   environment {
     variables = {
-      ConnectionStrings__DbConnection = local.db_connection_string
-      DB_CONNECTION                   = local.db_connection_string
-      Jwt__Secret                     = var.jwt_secret
-      JWT_SECRET                      = var.jwt_secret
-      Jwt__ExpiryHours                = tostring(var.jwt_expiry_hours)
-      ASPNETCORE_ENVIRONMENT          = var.environment
+      Cadastros__BaseUrl      = var.cadastros_base_url
+      Cadastros__ChaveInterna = var.cadastros_chave_interna
+      ASPNETCORE_ENVIRONMENT  = var.environment
     }
   }
 

@@ -12,13 +12,12 @@ namespace AutoReparos.AuthLambda.Tests.Functions;
 public class ClienteAuthFunctionTests
 {
     private readonly ICpfValidationService _cpfValidationService = Substitute.For<ICpfValidationService>();
-    private readonly IClienteAuthDatabaseService _databaseService = Substitute.For<IClienteAuthDatabaseService>();
-    private readonly ITokenGenerationService _tokenGenerationService = Substitute.For<ITokenGenerationService>();
+    private readonly ICadastrosClient _cadastros = Substitute.For<ICadastrosClient>();
     private readonly ClienteAuthFunction _function;
 
     public ClienteAuthFunctionTests()
     {
-        _function = new ClienteAuthFunction(_cpfValidationService, _databaseService, _tokenGenerationService);
+        _function = new ClienteAuthFunction(_cpfValidationService, _cadastros);
     }
 
     [Fact]
@@ -121,24 +120,27 @@ public class ClienteAuthFunctionTests
         response.Body.Should().Contain("CPF inválido");
     }
 
-    [Fact]
-    public async Task FunctionHandler_DeveRetornar401_QuandoClienteNaoExistirNoBanco()
+    private void ConfigurarCpfValido(string cpfEntrada = "97632180044")
     {
-        // Arrange
-        var request = new APIGatewayProxyRequest
-        {
-            HttpMethod = "POST",
-            Body = JsonSerializer.Serialize(new { cpf = "97632180044", email = "cliente@email.com" })
-        };
-        _cpfValidationService.Validar("97632180044").Returns(true);
-        _cpfValidationService.Normalizar("97632180044").Returns("97632180044");
-        _databaseService.BuscarClientePorCpfEmailAsync("97632180044", "cliente@email.com")
-            .Returns((ClienteDbRecord?)null);
+        _cpfValidationService.Validar(cpfEntrada).Returns(true);
+        _cpfValidationService.Normalizar(cpfEntrada).Returns("97632180044");
+    }
 
-        // Act
-        var response = await _function.FunctionHandler(request);
+    private static APIGatewayProxyRequest Requisicao(string cpf, string email) => new()
+    {
+        HttpMethod = "POST",
+        Body = JsonSerializer.Serialize(new { cpf, email })
+    };
 
-        // Assert
+    [Fact]
+    public async Task FunctionHandler_DeveRetornar401_QuandoCadastrosNaoLocalizarOCliente()
+    {
+        ConfigurarCpfValido();
+        _cadastros.AutenticarAsync("97632180044", "cliente@email.com", Arg.Any<CancellationToken>())
+            .Returns(new ResultadoAutenticacaoCadastros(StatusAutenticacaoCadastros.NaoEncontrado));
+
+        var response = await _function.FunctionHandler(Requisicao("97632180044", "cliente@email.com"));
+
         response.StatusCode.Should().Be(401);
         response.Body.Should().Contain("não localizado ou dados divergentes");
     }
@@ -146,93 +148,65 @@ public class ClienteAuthFunctionTests
     [Fact]
     public async Task FunctionHandler_DeveRetornar403_QuandoClienteEstiverInativo()
     {
-        // Arrange
-        var clienteInativo = new ClienteDbRecord(
-            Id: Guid.NewGuid(),
-            Nome: "Carlos Inativo",
-            Documento: "97632180044",
-            Email: "carlos@email.com",
-            InativoEm: DateTime.UtcNow.AddDays(-5)
-        );
+        ConfigurarCpfValido();
+        _cadastros.AutenticarAsync("97632180044", "carlos@email.com", Arg.Any<CancellationToken>())
+            .Returns(new ResultadoAutenticacaoCadastros(StatusAutenticacaoCadastros.Inativo));
 
-        var request = new APIGatewayProxyRequest
-        {
-            HttpMethod = "POST",
-            Body = JsonSerializer.Serialize(new { cpf = "97632180044", email = "carlos@email.com" })
-        };
-        _cpfValidationService.Validar("97632180044").Returns(true);
-        _cpfValidationService.Normalizar("97632180044").Returns("97632180044");
-        _databaseService.BuscarClientePorCpfEmailAsync("97632180044", "carlos@email.com")
-            .Returns(clienteInativo);
+        var response = await _function.FunctionHandler(Requisicao("97632180044", "carlos@email.com"));
 
-        // Act
-        var response = await _function.FunctionHandler(request);
-
-        // Assert
         response.StatusCode.Should().Be(403);
         response.Body.Should().Contain("encontra-se inativo");
     }
 
     [Fact]
-    public async Task FunctionHandler_DeveRetornar200ComToken_QuandoClienteForAtivoEValido()
+    public async Task FunctionHandler_DeveRetornar200ComOTokenDoCadastros_QuandoClienteForAtivoEValido()
     {
-        // Arrange
-        var clienteAtivo = new ClienteDbRecord(
-            Id: Guid.NewGuid(),
-            Nome: "Maria Ativa",
-            Documento: "97632180044",
-            Email: "maria@email.com",
-            InativoEm: null
-        );
+        ConfigurarCpfValido("976.321.800-44");
+        _cadastros.AutenticarAsync("97632180044", "maria@email.com", Arg.Any<CancellationToken>())
+            .Returns(new ResultadoAutenticacaoCadastros(
+                StatusAutenticacaoCadastros.Autenticado,
+                new ClienteAuthResponse("jwt_do_cadastros_123", 7200, "Maria Ativa", "maria@email.com")));
 
-        var request = new APIGatewayProxyRequest
-        {
-            HttpMethod = "POST",
-            Body = JsonSerializer.Serialize(new { cpf = "976.321.800-44", email = " Maria@email.com " })
-        };
-        _cpfValidationService.Validar("976.321.800-44").Returns(true);
-        _cpfValidationService.Normalizar("976.321.800-44").Returns("97632180044");
-        _databaseService.BuscarClientePorCpfEmailAsync("97632180044", "maria@email.com")
-            .Returns(clienteAtivo);
+        var response = await _function.FunctionHandler(Requisicao("976.321.800-44", " Maria@email.com "));
 
-        var responseEsperada = new ClienteAuthResponse(
-            Token: "jwt_token_valido_123",
-            ExpiresIn: 3600,
-            Nome: "Maria Ativa",
-            Email: "maria@email.com",
-            Role: "Cliente"
-        );
-        _tokenGenerationService.GerarTokenCliente(clienteAtivo).Returns(responseEsperada);
-
-        // Act
-        var response = await _function.FunctionHandler(request);
-
-        // Assert
         response.StatusCode.Should().Be(200);
-        response.Body.Should().Contain("jwt_token_valido_123");
+        response.Body.Should().Contain("jwt_do_cadastros_123");
         response.Body.Should().Contain("Maria Ativa");
         response.Headers.Should().ContainKey("Access-Control-Allow-Origin");
     }
 
     [Fact]
+    public async Task FunctionHandler_DeveRetornar503_QuandoCadastrosEstiverIndisponivel()
+    {
+        ConfigurarCpfValido();
+        _cadastros.AutenticarAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new CadastrosIndisponivelException("O Cadastros respondeu 500."));
+
+        var response = await _function.FunctionHandler(Requisicao("97632180044", "maria@email.com"));
+
+        response.StatusCode.Should().Be(503);
+        response.Body.Should().Contain("Serviço de cadastros indisponível");
+    }
+
+    [Fact]
     public async Task FunctionHandler_DeveRetornar500_QuandoOcorrerExcecaoInesperada()
     {
-        // Arrange
-        var request = new APIGatewayProxyRequest
-        {
-            HttpMethod = "POST",
-            Body = JsonSerializer.Serialize(new { cpf = "97632180044", email = "maria@email.com" })
-        };
-        _cpfValidationService.Validar("97632180044").Returns(true);
-        _cpfValidationService.Normalizar("97632180044").Returns("97632180044");
-        _databaseService.BuscarClientePorCpfEmailAsync(Arg.Any<string>(), Arg.Any<string>())
-            .ThrowsAsync(new InvalidOperationException("Falha na conexão com Postgres"));
+        ConfigurarCpfValido();
+        _cadastros.AutenticarAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("falha inesperada"));
 
-        // Act
-        var response = await _function.FunctionHandler(request);
+        var response = await _function.FunctionHandler(Requisicao("97632180044", "maria@email.com"));
 
-        // Assert
         response.StatusCode.Should().Be(500);
         response.Body.Should().Contain("Erro interno ao processar a autenticação");
+    }
+
+    [Fact]
+    public void Lambda_NaoReferenciaDriverDeBancoNemAssinaTokens()
+    {
+        var referenciados = typeof(ClienteAuthFunction).Assembly.GetReferencedAssemblies().Select(a => a.Name);
+
+        referenciados.Should().NotContain(nome => nome != null && nome.StartsWith("Npgsql", StringComparison.OrdinalIgnoreCase));
+        typeof(ClienteAuthFunction).Assembly.GetTypes().Should().NotContain(t => t.Name.Contains("TokenGeneration") || t.Name.Contains("Database"));
     }
 }
