@@ -11,8 +11,7 @@ namespace AutoReparos.AuthLambda.Functions;
 public class ClienteAuthFunction
 {
     private readonly ICpfValidationService _cpfValidationService;
-    private readonly IClienteAuthDatabaseService _databaseService;
-    private readonly ITokenGenerationService _tokenGenerationService;
+    private readonly ICadastrosClient _cadastros;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -29,43 +28,40 @@ public class ClienteAuthFunction
         { "Access-Control-Allow-Methods", "POST,OPTIONS" }
     };
 
+    private static readonly HttpClient HttpCompartilhado = new() { Timeout = TimeSpan.FromSeconds(10) };
+
     /// <summary>
     /// Construtor padrão utilizado no runtime da AWS Lambda (carrega configurações do ambiente).
     /// </summary>
     public ClienteAuthFunction()
     {
-        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__DbConnection")
-                               ?? Environment.GetEnvironmentVariable("DB_CONNECTION");
+        var baseUrl = Environment.GetEnvironmentVariable("Cadastros__BaseUrl")
+                      ?? Environment.GetEnvironmentVariable("CADASTROS_BASE_URL");
 
-        if (string.IsNullOrWhiteSpace(connectionString))
+        if (string.IsNullOrWhiteSpace(baseUrl))
         {
-            throw new InvalidOperationException("Variável de ambiente 'ConnectionStrings__DbConnection' ou 'DB_CONNECTION' não foi configurada.");
+            throw new InvalidOperationException("Variável de ambiente 'Cadastros__BaseUrl' ou 'CADASTROS_BASE_URL' não foi configurada.");
         }
 
-        var jwtSecret = Environment.GetEnvironmentVariable("Jwt__Secret")
-                        ?? Environment.GetEnvironmentVariable("JWT_SECRET");
+        var chaveInterna = Environment.GetEnvironmentVariable("Cadastros__ChaveInterna")
+                           ?? Environment.GetEnvironmentVariable("CADASTROS_CHAVE_INTERNA");
 
-        if (string.IsNullOrWhiteSpace(jwtSecret))
+        if (string.IsNullOrWhiteSpace(chaveInterna))
         {
-            throw new InvalidOperationException("Variável de ambiente 'Jwt__Secret' ou 'JWT_SECRET' não foi configurada.");
+            throw new InvalidOperationException("Variável de ambiente 'Cadastros__ChaveInterna' ou 'CADASTROS_CHAVE_INTERNA' não foi configurada.");
         }
 
         _cpfValidationService = new CpfValidationService();
-        _databaseService = new ClienteAuthDatabaseService(connectionString);
-        _tokenGenerationService = new TokenGenerationService(jwtSecret, expiryHours: 1);
+        _cadastros = new CadastrosClient(HttpCompartilhado, baseUrl, chaveInterna);
     }
 
     /// <summary>
     /// Construtor com injeção explícita de dependências para testes unitários e de integração.
     /// </summary>
-    public ClienteAuthFunction(
-        ICpfValidationService cpfValidationService,
-        IClienteAuthDatabaseService databaseService,
-        ITokenGenerationService tokenGenerationService)
+    public ClienteAuthFunction(ICpfValidationService cpfValidationService, ICadastrosClient cadastros)
     {
         _cpfValidationService = cpfValidationService ?? throw new ArgumentNullException(nameof(cpfValidationService));
-        _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
-        _tokenGenerationService = tokenGenerationService ?? throw new ArgumentNullException(nameof(tokenGenerationService));
+        _cadastros = cadastros ?? throw new ArgumentNullException(nameof(cadastros));
     }
 
     public async Task<APIGatewayProxyResponse> FunctionHandler(APIGatewayProxyRequest request, ILambdaContext? context = null)
@@ -118,21 +114,20 @@ public class ClienteAuthFunction
 
             var cpfNormalizado = _cpfValidationService.Normalizar(authRequest.Cpf);
 
-            // Consulta ao banco PostgreSQL
-            var cliente = await _databaseService.BuscarClientePorCpfEmailAsync(cpfNormalizado, emailSanitizado);
+            // O Cadastros (dono dos clientes) autentica e emite o JWT; a Lambda não acessa o banco
+            var resultado = await _cadastros.AutenticarAsync(cpfNormalizado, emailSanitizado);
 
-            if (cliente == null)
+            return resultado.Status switch
             {
-                return CriarResposta(401, new { erro = "Cliente não localizado ou dados divergentes." });
-            }
-
-            if (!cliente.Ativo)
-            {
-                return CriarResposta(403, new { erro = "Cadastro do cliente encontra-se inativo. Entre em contato com a recepção da oficina." });
-            }
-
-            var responseDto = _tokenGenerationService.GerarTokenCliente(cliente);
-            return CriarResposta(200, responseDto);
+                StatusAutenticacaoCadastros.Autenticado => CriarResposta(200, resultado.Resposta!),
+                StatusAutenticacaoCadastros.Inativo => CriarResposta(403, new { erro = "Cadastro do cliente encontra-se inativo. Entre em contato com a recepção da oficina." }),
+                _ => CriarResposta(401, new { erro = "Cliente não localizado ou dados divergentes." })
+            };
+        }
+        catch (CadastrosIndisponivelException ex)
+        {
+            context?.Logger.LogError($"[ClienteAuthFunction] Cadastros indisponível: {ex.Message}");
+            return CriarResposta(503, new { erro = "Serviço de cadastros indisponível. Tente novamente em instantes." });
         }
         catch (Exception ex)
         {

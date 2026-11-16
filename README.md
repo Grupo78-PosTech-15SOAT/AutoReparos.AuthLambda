@@ -3,7 +3,7 @@
 > **Projeto:** AutoReparos - Sistema Integrado de Oficina Mecânica  
 > **Componente:** Function Serverless de Autenticação de Clientes  
 > **Fase:** Fase 3 Tech Challenge (13SOAT / 15SOAT FIAP)  
-> **Stack:** C# .NET 10, AWS Lambda (`Amazon.Lambda.Core`, `Amazon.Lambda.APIGatewayEvents`), Npgsql, JWT (`System.IdentityModel.Tokens.Jwt`)
+> **Stack:** C# .NET 10, AWS Lambda (`Amazon.Lambda.Core`, `Amazon.Lambda.APIGatewayEvents`), HttpClient para o Cadastros, leitura do JWT (`System.IdentityModel.Tokens.Jwt`)
 
 ---
 
@@ -14,9 +14,9 @@ O cliente final não possui cadastro de login/senha no ASP.NET Identity (que é 
 
 Ao acessar o portal do cliente, ele informa apenas **CPF** e **E-mail**. A Lambda:
 1. Higieniza e valida matematicamente o CPF através do algoritmo Módulo 11 da Receita Federal (rejeitando sequências de dígitos repetidos como `111.111.111-11`);
-2. Conecta-se diretamente ao PostgreSQL gerenciado (AWS RDS) de forma segura através de consultas parametrizadas com `NpgsqlCommand`;
-3. Valida a existência e o status ativo do cliente (`InativoEm IS NULL`);
-4. Emite um **JWT efêmero (1 hora)** assinado com HMAC-SHA256, contendo as claims: `sub` (ClienteId GUID), `cpf`, `email` e `role: "Cliente"`.
+2. Chama o endpoint interno do **Cadastros** (`POST /internal/clientes/autenticar`, com o cabeçalho `X-Chave-Interna`), dono dos clientes. **A Lambda não acessa o banco** e **não assina tokens**;
+3. O Cadastros valida a existência, o e-mail e o status ativo do cliente e devolve o cliente e um **JWT RS256** (com `kid`) contendo `sub` (ClienteId GUID), `cpf`, `email` e `role: "Cliente"`. Os serviços validam esse token pelo JWKS do Cadastros;
+4. A Lambda repassa o token ao cliente com o tempo restante (`expiresIn`, lido do `exp` do JWT).
 
 ```mermaid
 sequenceDiagram
@@ -24,7 +24,7 @@ sequenceDiagram
     actor Cliente as Cliente (Navegador)
     participant APIGW as AWS API Gateway v2
     participant Lambda as AutoReparos.AuthLambda
-    participant RDS as PostgreSQL (AWS RDS)
+    participant CAD as Cadastros (interno)
 
     Cliente->>APIGW: POST /auth/cliente { cpf, email }
     APIGW->>Lambda: Invoca Handler (payload proxy 1.0 / APIGatewayProxyRequest)
@@ -33,16 +33,17 @@ sequenceDiagram
         Lambda-->>APIGW: 400 Bad Request
         APIGW-->>Cliente: Erro: CPF inválido
     end
-    Lambda->>RDS: SELECT Id, Nome, InativoEm FROM Clientes WHERE Documento=@cpf AND LOWER(Email)=LOWER(@email)
-    alt Cliente não encontrado
+    Lambda->>CAD: POST /internal/clientes/autenticar { cpf, email } + X-Chave-Interna
+    alt Cliente não encontrado (404)
         Lambda-->>APIGW: 401 Unauthorized
         APIGW-->>Cliente: Credenciais inválidas
-    else Cliente Inativo (InativoEm != null)
+    else Cliente Inativo (403)
         Lambda-->>APIGW: 403 Forbidden
         APIGW-->>Cliente: Cadastro inativo
-    else Cliente Ativo
-        Lambda->>Lambda: Gera JWT efêmero (exp: 1h, role: "Cliente")
-        Lambda-->>APIGW: 200 OK { token, expiresIn: 3600, nome, email }
+    else Cadastros indisponível (5xx, rede ou chave recusada)
+        Lambda-->>APIGW: 503 Service Unavailable
+    else Cliente Ativo (200 com o JWT RS256 do Cadastros)
+        Lambda-->>APIGW: 200 OK { token, expiresIn, nome, email }
         APIGW-->>Cliente: Token JWT retornado
     end
 ```
@@ -60,21 +61,18 @@ AutoReparos.AuthLambda/
 │       ├── Services/
 │       │   ├── ICpfValidationService.cs         # Validação de CPF
 │       │   ├── CpfValidationService.cs
-│       │   ├── IClienteAuthDatabaseService.cs   # Consulta ao Postgres
-│       │   ├── ClienteAuthDatabaseService.cs
-│       │   ├── ITokenGenerationService.cs       # Emissão do JWT efêmero
-│       │   └── TokenGenerationService.cs
+│       │   ├── ICadastrosClient.cs              # Contrato do endpoint interno do Cadastros
+│       │   └── CadastrosClient.cs               # HttpClient com X-Chave-Interna
 │       └── Models/
 │           ├── ClienteAuthRequest.cs            # DTO de entrada { cpf, email }
-│           ├── ClienteAuthResponse.cs           # DTO de saída { token, expiresIn, nome, email }
-│           └── ClienteDbRecord.cs               # Record leve de consulta
+│           └── ClienteAuthResponse.cs           # DTO de saída { token, expiresIn, nome, email }
 ├── tests/
-│   └── AutoReparos.AuthLambda.Tests/            # Suíte de 40 testes unitários com xUnit & NSubstitute
+│   └── AutoReparos.AuthLambda.Tests/            # Suíte de testes unitários com xUnit & NSubstitute
 │       ├── Functions/
-│       │   └── ClienteAuthFunctionTests.cs      # Testes de status HTTP (200, 400, 401, 403, 500)
+│       │   └── ClienteAuthFunctionTests.cs      # Testes de status HTTP (200, 400, 401, 403, 500, 503)
 │       └── Services/
 │           ├── CpfValidationServiceTests.cs      # Casos de borda de CPF e sequências
-│           └── TokenGenerationServiceTests.cs   # Claims, expiração e assinatura
+│           └── CadastrosClientTests.cs          # Chamada interna, cabeçalho, status e falhas
 ├── .github/workflows/ci.yml                     # Pipeline CI/CD GitHub Actions
 └── AutoReparos.AuthLambda.slnx                  # Solution .NET 10 autônoma
 ```
@@ -85,19 +83,18 @@ AutoReparos.AuthLambda/
 
 | Variável | Descrição | Exemplo |
 | :--- | :--- | :--- |
-| `ConnectionStrings__DbConnection` | String de conexão para o PostgreSQL gerenciado | `Host=rds.aws.com;Database=autoreparos;Username=admin;Password=***` |
-| `Jwt__Secret` | Chave simétrica compartilhada (mínimo 32 caracteres) | `sua-chave-secreta-de-producao-com-32-chars` |
+| `Cadastros__BaseUrl` | URL interna do Cadastros (alcançável só de dentro da rede) | `http://cadastros.autoreparos.svc.cluster.local` |
+| `Cadastros__ChaveInterna` | Segredo de `X-Chave-Interna`, o mesmo Secret do K8s do Cadastros | (segredo) |
+
+A Lambda não tem mais string de conexão com o banco nem segredo de assinatura de JWT: o security group do RDS não precisa liberar a Lambda.
 
 ---
 
 ## 4. Ambiente de Testes Local com Docker Compose
 
-O repositório inclui um arquivo `docker-compose.yml` para executar um PostgreSQL local e validar a Lambda em ambiente isolado:
+O `docker-compose.yml` sobe a Lambda apontando para um Cadastros em execução (por padrão `http://host.docker.internal:8080`; defina `CHAVE_INTERNA` com o mesmo segredo do Cadastros):
 
 ```bash
-# Iniciar o PostgreSQL para testes locais da Lambda
-docker-compose up -d postgres
-
 # Construir a imagem Docker da Lambda (.NET 10)
 docker build -t autoreparos-auth-lambda .
 ```
@@ -110,7 +107,7 @@ docker build -t autoreparos-auth-lambda .
 # Restaurar dependências e compilar
 dotnet build AutoReparos.AuthLambda.slnx
 
-# Executar suíte de 40 testes unitários com cobertura
+# Executar suíte de testes unitários com cobertura
 dotnet test AutoReparos.AuthLambda.slnx
 ```
 
